@@ -526,6 +526,12 @@ impl Agent {
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Ctrl+C received, flushing pending batches...");
                     batcher.flush_all().await;
+                    // Drain any flushed messages before shutdown
+                    while let Ok(msg) = batched_rx.try_recv() {
+                        if let Err(e) = self.handle_message(&msg).await {
+                            tracing::error!("Error handling flushed message during shutdown: {}", e);
+                        }
+                    }
                     break;
                 }
                 // Receive batched (merged) messages
@@ -555,6 +561,12 @@ impl Agent {
                         None => {
                             tracing::info!("All channel streams ended, flushing pending batches...");
                             batcher.flush_all().await;
+                            // Drain any flushed messages before shutdown
+                            while let Ok(msg) = batched_rx.try_recv() {
+                                if let Err(e) = self.handle_message(&msg).await {
+                                    tracing::error!("Error handling flushed message during shutdown: {}", e);
+                                }
+                            }
                             break;
                         }
                     }
@@ -617,6 +629,12 @@ impl Agent {
                     // Shutdown signal received (/quit, /exit, /shutdown)
                     tracing::info!("Shutdown command received, flushing pending batches...");
                     batcher.flush_all().await;
+                    // Drain any flushed messages before shutdown
+                    while let Ok(msg) = batched_rx.try_recv() {
+                        if let Err(e) = self.handle_message(&msg).await {
+                            tracing::error!("Error handling flushed message during shutdown: {}", e);
+                        }
+                    }
                     break;
                 }
                 Err(e) => {
