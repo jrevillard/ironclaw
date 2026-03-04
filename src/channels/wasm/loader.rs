@@ -285,6 +285,16 @@ impl LoadedChannel {
             .and_then(|f| f.webhook_verification_mode())
     }
 
+    /// Get the JSON pointer for extracting message IDs from metadata_json.
+    ///
+    /// Returns the configured pointer (e.g., "/message_id" for WhatsApp),
+    /// or None if not configured (falls back to user_id).
+    pub fn message_id_json_pointer(&self) -> Option<&str> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_message_id_json_pointer())
+    }
+
     /// Get the webhook secret name from capabilities.
     pub fn webhook_secret_name(&self) -> String {
         self.capabilities_file

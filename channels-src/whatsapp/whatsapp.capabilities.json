@@ -48,7 +48,8 @@
         "secret_header": "X-Hub-Signature-256",
         "secret_name": "whatsapp_verify_token",
         "verification_mode": "query_param",
-        "hmac_secret_name": "whatsapp_app_secret"
+        "hmac_secret_name": "whatsapp_app_secret",
+        "message_id_json_pointer": "/message_id"
       }
     }
   },

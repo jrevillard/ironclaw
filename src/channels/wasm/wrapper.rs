@@ -1,7 +1,7 @@
 //! WASM channel wrapper implementing the Channel trait.
 //!
 //! Wraps a prepared WASM channel module and provides the Channel interface.
-//! Each callback (on_start, on_http_request, on_poll, on_respond) creates
+//! Each callback (on_start, on_http_request, on_poll, on_respond, on_message_persisted) creates
 //! a fresh WASM instance for isolation.
 //!
 //! # Architecture
@@ -1737,6 +1737,111 @@ impl WasmChannel {
             Err(_) => Err(WasmChannelError::Timeout {
                 name: channel_name.to_string(),
                 callback: "on_status".to_string(),
+            }),
+        }
+    }
+
+    /// Execute the on-message-persisted callback.
+    ///
+    /// Called after a message has been persisted to the database.
+    /// Channels can use this to perform follow-up actions like mark_as_read.
+    /// This is a best-effort callback - errors are logged but don't block the ACK.
+    pub async fn call_on_message_persisted(
+        &self,
+        metadata_json: &str,
+    ) -> Result<(), WasmChannelError> {
+        tracing::info!(
+            channel = %self.name,
+            metadata_len = metadata_json.len(),
+            "call_on_message_persisted invoked"
+        );
+
+        // If no WASM bytes, do nothing (for testing or channels that don't implement this)
+        if self.prepared.component().is_none() {
+            tracing::debug!(
+                channel = %self.name,
+                "WASM channel on_message_persisted called (no WASM module)"
+            );
+            return Ok(());
+        }
+
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = self.capabilities.clone();
+        let timeout = self.runtime.config().callback_timeout;
+        let channel_name = self.name.clone();
+        let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
+        let pairing_store = self.pairing_store.clone();
+
+        let metadata_json = metadata_json.to_string();
+
+        let result = tokio::time::timeout(timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    host_credentials,
+                    pairing_store,
+                )?;
+                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+
+                let channel_iface = instance.near_agent_channel();
+
+                tracing::info!("Calling WASM on_message_persisted");
+
+                // Call on_message_persisted using the generated typed interface
+                let wasm_result = channel_iface
+                    .call_on_message_persisted(&mut store, &metadata_json)
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "WASM on_message_persisted call failed");
+                        Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel)
+                    })?;
+
+                tracing::info!(wasm_result = ?wasm_result, "WASM on_message_persisted returned");
+
+                // Check for WASM-level errors
+                if let Err(err_msg) = wasm_result {
+                    tracing::error!(error = %err_msg, "WASM on_message_persisted returned error");
+                    return Err(WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: err_msg.clone(),
+                    });
+                }
+
+                let host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                tracing::info!("on_message_persisted WASM execution completed successfully");
+                Ok(((), host_state))
+            })
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "spawn_blocking panicked");
+                WasmChannelError::ExecutionPanicked {
+                    name: channel_name.clone(),
+                    reason: e.to_string(),
+                }
+            })?
+        })
+        .await;
+
+        let channel_name = self.name.clone();
+        match result {
+            Ok(Ok((_, _host_state))) => {
+                tracing::debug!(
+                    channel = %channel_name,
+                    "WASM channel on_message_persisted completed"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(WasmChannelError::Timeout {
+                name: channel_name,
+                callback: "on_message_persisted".to_string(),
             }),
         }
     }

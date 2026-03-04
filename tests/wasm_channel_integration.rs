@@ -71,7 +71,7 @@ mod router_tests {
         }];
 
         router
-            .register(channel.clone(), endpoints, None, None, None)
+            .register(channel.clone(), endpoints, None, None, None, None)
             .await;
 
         // Verify channel is found by path
@@ -100,6 +100,7 @@ mod router_tests {
                 channel,
                 vec![],
                 Some("my-secret-123".to_string()),
+                None,
                 None,
                 None,
             )
@@ -141,7 +142,9 @@ mod router_tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None, None).await;
+        router
+            .register(channel, endpoints, None, None, None, None)
+            .await;
 
         // Channel exists
         assert!(router.get_channel_for_path("/webhook/temp").await.is_some());
@@ -173,7 +176,9 @@ mod router_tests {
                 require_secret: false,
             }];
 
-            router.register(channel, endpoints, None, None, None).await;
+            router
+                .register(channel, endpoints, None, None, None, None)
+                .await;
         }
 
         // Verify all channels are registered

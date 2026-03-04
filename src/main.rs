@@ -973,6 +973,7 @@ async fn setup_wasm_channels(
 
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let verification_mode = loaded.verification_mode().map(|s| s.to_string());
+        let message_id_json_pointer = loaded.message_id_json_pointer().map(|s| s.to_string());
 
         let webhook_path = format!("/webhook/{}", channel_name);
         let endpoints = vec![RegisteredEndpoint {
@@ -1035,6 +1036,7 @@ async fn setup_wasm_channels(
                 webhook_secret.clone(),
                 secret_header,
                 verification_mode,
+                message_id_json_pointer,
             )
             .await;
 
@@ -1084,27 +1086,6 @@ async fn setup_wasm_channels(
                         "Failed to inject channel credentials"
                     );
                 }
-            }
-
-            // Register access token for mark_as_read (WhatsApp-style channels)
-            // The host needs this to call the API directly after DB persistence
-            let access_token_name = format!("{}_access_token", channel_name);
-            if let Ok(token_secret) = secrets.get_decrypted("default", &access_token_name).await {
-                wasm_router
-                    .register_access_token(&channel_name, token_secret.expose().to_string())
-                    .await;
-                tracing::info!(
-                    channel = %channel_name,
-                    "Registered access token for host-side mark_as_read"
-                );
-            }
-
-            // Register API version for channels that need it
-            let api_version_name = format!("{}_api_version", channel_name);
-            if let Ok(version_secret) = secrets.get_decrypted("default", &api_version_name).await {
-                wasm_router
-                    .register_api_version(&channel_name, version_secret.expose().to_string())
-                    .await;
             }
         }
 

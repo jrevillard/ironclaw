@@ -298,9 +298,9 @@ impl Agent {
 
             tracing::debug!(ack_key = %ack_key, "Signaling webhook ACK after persistence");
 
-            // Signal ACK with metadata for mark_as_read
+            // Signal ACK with metadata for on_message_persisted callback
             router
-                .ack_message(&ack_key, Some(&message.metadata.to_string()))
+                .ack_message(&ack_key, &message.metadata.to_string())
                 .await;
         }
 

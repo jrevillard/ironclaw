@@ -20,14 +20,13 @@ use tokio::sync::{RwLock, oneshot};
 
 use crate::channels::wasm::wrapper::{HttpResponseWithMessages, WasmChannel};
 
-/// Metadata extracted from WhatsApp webhook messages.
-/// Used for ACK keys, deduplication, and mark_as_read API calls.
-#[derive(Deserialize)]
-struct WhatsAppMetadata {
-    /// The WhatsApp message ID (wamid.xxx) used for ACK and deduplication.
-    message_id: Option<String>,
-    /// The phone number ID for the WhatsApp Business account.
-    phone_number_id: Option<String>,
+/// Extract a value from a JSON string using a JSON pointer.
+///
+/// JSON pointer format: "/field1/field2" to access {"field1": {"field2": "value"}}
+/// Returns None if the pointer is invalid or the path doesn't exist.
+pub(crate) fn extract_json_pointer(json: &str, pointer: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value.pointer(pointer)?.as_str().map(|s| s.to_string())
 }
 
 /// A registered HTTP endpoint for a WASM channel.
@@ -59,13 +58,12 @@ pub struct WasmChannelRouter {
     verification_modes: RwLock<HashMap<String, String>>,
     /// HMAC secrets for signature verification by channel name (WhatsApp/Slack style).
     hmac_secrets: RwLock<HashMap<String, String>>,
+    /// JSON pointers for extracting message IDs from metadata_json by channel name.
+    /// Used for ACK key construction and deduplication.
+    message_id_json_pointers: RwLock<HashMap<String, String>>,
     /// Pending webhook acknowledgments by "channel:message_id" key.
     /// Used to delay webhook 200 response until message is persisted to DB.
     pending_acks: RwLock<HashMap<String, oneshot::Sender<()>>>,
-    /// Access tokens by channel name (for host-side API calls like mark_as_read).
-    access_tokens: RwLock<HashMap<String, String>>,
-    /// API versions by channel name (for host-side API calls).
-    api_versions: RwLock<HashMap<String, String>>,
     /// Database for webhook message deduplication.
     db: RwLock<Option<Arc<dyn crate::db::WebhookDedupStore + Send + Sync>>>,
 }
@@ -81,9 +79,8 @@ impl WasmChannelRouter {
             signature_keys: RwLock::new(HashMap::new()),
             verification_modes: RwLock::new(HashMap::new()),
             hmac_secrets: RwLock::new(HashMap::new()),
+            message_id_json_pointers: RwLock::new(HashMap::new()),
             pending_acks: RwLock::new(HashMap::new()),
-            access_tokens: RwLock::new(HashMap::new()),
-            api_versions: RwLock::new(HashMap::new()),
             db: RwLock::new(None),
         }
     }
@@ -138,6 +135,8 @@ impl WasmChannelRouter {
     /// * `verification_mode` - Optional verification mode for GET requests:
     ///   - "query_param": Skip host-level secret validation for GET, WASM validates via query param
     ///   - "signature": Always require signature validation
+    /// * `message_id_json_pointer` - Optional JSON pointer to extract message ID from metadata_json
+    ///   (e.g., "/message_id" for WhatsApp). If None, falls back to user_id.
     pub async fn register(
         &self,
         channel: Arc<WasmChannel>,
@@ -145,6 +144,7 @@ impl WasmChannelRouter {
         secret: Option<String>,
         secret_header: Option<String>,
         verification_mode: Option<String>,
+        message_id_json_pointer: Option<String>,
     ) {
         let name = channel.channel_name().to_string();
 
@@ -175,7 +175,18 @@ impl WasmChannelRouter {
 
         // Store verification mode if provided
         if let Some(m) = verification_mode {
-            self.verification_modes.write().await.insert(name, m);
+            self.verification_modes
+                .write()
+                .await
+                .insert(name.clone(), m);
+        }
+
+        // Store message ID JSON pointer if provided
+        if let Some(p) = message_id_json_pointer {
+            self.message_id_json_pointers
+                .write()
+                .await
+                .insert(name.clone(), p);
         }
     }
 
@@ -196,6 +207,18 @@ impl WasmChannelRouter {
     /// Returns the configured mode or None (default behavior).
     pub async fn get_verification_mode(&self, channel_name: &str) -> Option<String> {
         self.verification_modes
+            .read()
+            .await
+            .get(channel_name)
+            .cloned()
+    }
+
+    /// Get the message ID JSON pointer for a channel.
+    ///
+    /// Returns the configured JSON pointer for extracting message IDs from
+    /// metadata_json, or None if not configured (falls back to user_id).
+    pub async fn get_message_id_json_pointer(&self, channel_name: &str) -> Option<String> {
+        self.message_id_json_pointers
             .read()
             .await
             .get(channel_name)
@@ -225,6 +248,10 @@ impl WasmChannelRouter {
         self.signature_keys.write().await.remove(channel_name);
         self.verification_modes.write().await.remove(channel_name);
         self.hmac_secrets.write().await.remove(channel_name);
+        self.message_id_json_pointers
+            .write()
+            .await
+            .remove(channel_name);
 
         // Remove all paths for this channel
         self.path_to_channel
@@ -347,123 +374,36 @@ impl WasmChannelRouter {
     /// Signal that a message has been persisted and the webhook can return 200 OK.
     ///
     /// Called by the agent loop after persist_user_message() completes.
-    /// Also triggers mark_as_read for channels that support it (WhatsApp).
+    /// Also triggers the on_message_persisted WASM callback for channels that
+    /// implement it (e.g., WhatsApp for mark_as_read).
     ///
     /// Note: Deduplication recording happens at webhook handler level (before
     /// sending to agent) to prevent race conditions with concurrent webhooks.
     ///
     /// # Arguments
-    /// * `key` - The same key passed to register_pending_ack()
-    /// * `message_metadata` - Optional JSON metadata for mark_as_read (phone_number_id, etc.)
-    pub async fn ack_message(&self, key: &str, message_metadata: Option<&str>) {
+    /// * `key` - The same key passed to register_pending_ack() (format: "channel:message_id")
+    /// * `message_metadata` - JSON metadata for channel-specific post-persistence actions
+    pub async fn ack_message(&self, key: &str, message_metadata: &str) {
         if let Some(tx) = self.pending_acks.write().await.remove(key) {
             // Signal the webhook handler to return 200 OK
             let _ = tx.send(());
             tracing::debug!(key = %key, "Webhook ACK signaled");
 
-            // Trigger mark_as_read for supported channels
-            if let Some(metadata) = message_metadata
-                && let Err(e) = self.trigger_mark_as_read(key, metadata).await
+            // Parse key to get channel name for callback
+            let channel_name = key.split(':').next().unwrap_or("");
+
+            // Look up the channel and call on_message_persisted
+            if let Some(channel) = self.channels.read().await.get(channel_name)
+                && let Err(e) = channel.call_on_message_persisted(message_metadata).await
             {
-                tracing::warn!(key = %key, error = %e, "Failed to mark message as read");
+                tracing::warn!(
+                    channel = %channel_name,
+                    error = %e,
+                    "on_message_persisted callback failed (best-effort)"
+                );
             }
         } else {
             tracing::debug!(key = %key, "No pending ACK found (may have timed out)");
-        }
-    }
-
-    /// Store access token for a channel (for host-side API calls like mark_as_read).
-    pub async fn register_access_token(&self, channel_name: &str, token: String) {
-        self.access_tokens
-            .write()
-            .await
-            .insert(channel_name.to_string(), token);
-        tracing::info!(channel = %channel_name, "Registered access token for mark_as_read");
-    }
-
-    /// Store API version for a channel (for host-side API calls).
-    pub async fn register_api_version(&self, channel_name: &str, version: String) {
-        self.api_versions
-            .write()
-            .await
-            .insert(channel_name.to_string(), version);
-    }
-
-    /// Get the access token for a channel.
-    pub async fn get_access_token(&self, channel_name: &str) -> Option<String> {
-        self.access_tokens.read().await.get(channel_name).cloned()
-    }
-
-    /// Get the API version for a channel.
-    pub async fn get_api_version(&self, channel_name: &str) -> Option<String> {
-        self.api_versions.read().await.get(channel_name).cloned()
-    }
-
-    /// Trigger mark_as_read for a message after it's been persisted.
-    ///
-    /// Parses the key to extract channel name and calls the appropriate API.
-    async fn trigger_mark_as_read(&self, key: &str, metadata_json: &str) -> Result<(), String> {
-        // Parse key format: "channel:message_id"
-        let parts: Vec<&str> = key.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid ACK key format: {}", key));
-        }
-        let channel_name = parts[0];
-        let message_id = parts[1];
-
-        // Only WhatsApp supports mark_as_read currently
-        if channel_name != "whatsapp" {
-            tracing::debug!(channel = %channel_name, "Channel does not support mark_as_read");
-            return Ok(());
-        }
-
-        // Parse metadata to get phone_number_id
-        let metadata: WhatsAppMetadata =
-            serde_json::from_str(metadata_json).map_err(|e| format!("Invalid metadata: {}", e))?;
-
-        let phone_number_id = metadata
-            .phone_number_id
-            .ok_or_else(|| "Missing phone_number_id in metadata".to_string())?;
-
-        // Get stored credentials
-        let access_token = self
-            .get_access_token(channel_name)
-            .await
-            .ok_or_else(|| "No access token registered for WhatsApp".to_string())?;
-        let api_version = self
-            .get_api_version(channel_name)
-            .await
-            .unwrap_or_else(|| "v25.0".to_string());
-
-        // Call WhatsApp API to mark as read
-        let url = format!(
-            "https://graph.facebook.com/{}/{}/messages",
-            api_version, phone_number_id
-        );
-        let payload = serde_json::json!({
-            "messaging_product": "whatsapp",
-            "status": "read",
-            "message_id": message_id
-        });
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", access_token))
-            .json(&payload)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-        if response.status().is_success() {
-            tracing::debug!(message_id = %message_id, "Marked WhatsApp message as read");
-            Ok(())
-        } else {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            Err(format!("WhatsApp API error: {} - {}", status, body))
         }
     }
 }
@@ -804,18 +744,28 @@ async fn webhook_handler(
                 let mut new_messages: Vec<_> = Vec::new();
 
                 for msg in &emitted_messages {
-                    // Parse metadata to extract message_id for ACK key and deduplication
-                    // For WhatsApp, metadata contains: phone_number_id, sender_phone, message_id, timestamp
-                    let (ack_key, external_msg_id) = if let Ok(meta) =
-                        serde_json::from_str::<WhatsAppMetadata>(&msg.metadata_json)
+                    // Extract message_id using channel's configured JSON pointer
+                    // Falls back to user_id if pointer not configured or extraction fails
+                    let message_id_json_pointer =
+                        state.router.get_message_id_json_pointer(channel_name).await;
+
+                    let (ack_key, external_msg_id) = if let Some(pointer) = &message_id_json_pointer
                     {
-                        if let Some(msg_id) = &meta.message_id {
-                            (format!("{}:{}", channel_name, msg_id), Some(msg_id.clone()))
-                        } else {
-                            // Fallback to user_id if no message_id
-                            (format!("{}:{}", channel_name, msg.user_id), None)
+                        // Try to extract message_id using the JSON pointer
+                        match extract_json_pointer(&msg.metadata_json, pointer) {
+                            Some(msg_id) => (format!("{}:{}", channel_name, msg_id), Some(msg_id)),
+                            None => {
+                                // Fallback to user_id if extraction fails
+                                tracing::debug!(
+                                    channel = %channel_name,
+                                    pointer = %pointer,
+                                    "JSON pointer extraction failed, falling back to user_id"
+                                );
+                                (format!("{}:{}", channel_name, msg.user_id), None)
+                            }
                         }
                     } else {
+                        // No pointer configured, use user_id
                         (format!("{}:{}", channel_name, msg.user_id), None)
                     };
 
@@ -1063,7 +1013,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::wasm::capabilities::ChannelCapabilities;
-    use crate::channels::wasm::router::{RegisteredEndpoint, WasmChannelRouter};
+    use crate::channels::wasm::router::{
+        RegisteredEndpoint, WasmChannelRouter, extract_json_pointer,
+    };
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
@@ -1114,6 +1066,7 @@ mod tests {
                 Some("secret123".to_string()),
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -1133,7 +1086,14 @@ mod tests {
         let channel = create_test_channel("slack");
 
         router
-            .register(channel, vec![], Some("secret123".to_string()), None, None)
+            .register(
+                channel,
+                vec![],
+                Some("secret123".to_string()),
+                None,
+                None,
+                None,
+            )
             .await;
 
         // Correct secret
@@ -1144,7 +1104,9 @@ mod tests {
 
         // Channel without secret always validates
         let channel2 = create_test_channel("telegram");
-        router.register(channel2, vec![], None, None, None).await;
+        router
+            .register(channel2, vec![], None, None, None, None)
+            .await;
         assert!(router.validate_secret("telegram", "anything").await);
     }
 
@@ -1160,7 +1122,9 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None, None).await;
+        router
+            .register(channel, endpoints, None, None, None, None)
+            .await;
 
         // Should exist
         assert!(
@@ -1189,8 +1153,12 @@ mod tests {
         let channel1 = create_test_channel("slack");
         let channel2 = create_test_channel("telegram");
 
-        router.register(channel1, vec![], None, None, None).await;
-        router.register(channel2, vec![], None, None, None).await;
+        router
+            .register(channel1, vec![], None, None, None, None)
+            .await;
+        router
+            .register(channel2, vec![], None, None, None, None)
+            .await;
 
         let channels = router.list_channels().await;
         assert_eq!(channels.len(), 2);
@@ -1211,6 +1179,7 @@ mod tests {
                 Some("secret123".to_string()),
                 Some("X-Telegram-Bot-Api-Secret-Token".to_string()),
                 None,
+                None,
             )
             .await;
 
@@ -1223,7 +1192,14 @@ mod tests {
         // Channel without custom header should use default
         let channel2 = create_test_channel("slack");
         router
-            .register(channel2, vec![], Some("secret456".to_string()), None, None)
+            .register(
+                channel2,
+                vec![],
+                Some("secret456".to_string()),
+                None,
+                None,
+                None,
+            )
             .await;
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
     }
@@ -1235,7 +1211,9 @@ mod tests {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
 
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         let fake_pub_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
         router
@@ -1251,7 +1229,9 @@ mod tests {
     async fn test_no_signature_key_returns_none() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         // Slack has no signature key registered
         let key = router.get_signature_key("slack").await;
@@ -1270,7 +1250,9 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None, None).await;
+        router
+            .register(channel, endpoints, None, None, None, None)
+            .await;
         // Use a valid 32-byte Ed25519 key for this test
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -1294,7 +1276,9 @@ mod tests {
     async fn test_register_valid_signature_key_succeeds() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         // Valid 32-byte Ed25519 public key (from test keypair)
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
@@ -1306,7 +1290,9 @@ mod tests {
     async fn test_register_invalid_hex_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         let result = router
             .register_signature_key("discord", "not-valid-hex-zzz")
@@ -1318,7 +1304,9 @@ mod tests {
     async fn test_register_wrong_length_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         // 16 bytes instead of 32
         let short_key = hex::encode([0u8; 16]);
@@ -1330,7 +1318,9 @@ mod tests {
     async fn test_register_empty_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         let result = router.register_signature_key("discord", "").await;
         assert!(result.is_err(), "Empty key should be rejected");
@@ -1340,7 +1330,9 @@ mod tests {
     async fn test_valid_key_is_retrievable() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -1356,7 +1348,9 @@ mod tests {
     async fn test_invalid_key_does_not_store() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         // Attempt to register invalid key
         let _ = router
@@ -1391,7 +1385,7 @@ mod tests {
         }];
 
         wasm_router
-            .register(channel, endpoints, None, None, None)
+            .register(channel, endpoints, None, None, None, None)
             .await;
 
         let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
@@ -1625,6 +1619,7 @@ mod tests {
                 Some("my-secret".to_string()),
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -1688,7 +1683,9 @@ mod tests {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("whatsapp");
 
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         router
             .register_hmac_secret("whatsapp", "my_app_secret".to_string())
@@ -1702,7 +1699,9 @@ mod tests {
     async fn test_no_hmac_secret_returns_none() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("telegram");
-        router.register(channel, vec![], None, None, None).await;
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
 
         let secret = router.get_hmac_secret("telegram").await;
         assert!(secret.is_none());
@@ -1720,7 +1719,9 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None, None).await;
+        router
+            .register(channel, endpoints, None, None, None, None)
+            .await;
         router
             .register_hmac_secret("whatsapp", "secret123".to_string())
             .await;
@@ -1754,6 +1755,7 @@ mod tests {
                 None,
                 None,
                 Some("query_param".to_string()),
+                None,
             )
             .await;
 
@@ -1799,6 +1801,7 @@ mod tests {
                 None,
                 None,
                 Some("query_param".to_string()),
+                None,
             )
             .await;
 
@@ -1847,6 +1850,7 @@ mod tests {
                 None,
                 None,
                 Some("query_param".to_string()),
+                None,
             )
             .await;
 
@@ -1887,7 +1891,7 @@ mod tests {
         let rx = router.register_pending_ack(ack_key.to_string()).await;
 
         // Ack the message
-        router.ack_message(ack_key, None).await;
+        router.ack_message(ack_key, "").await;
 
         // Verify the ACK was received
         let result = rx.await;
@@ -1908,7 +1912,7 @@ mod tests {
         );
 
         // Ack the message
-        router.ack_message(ack_key, None).await;
+        router.ack_message(ack_key, "").await;
 
         // Verify entry was removed
         assert!(
@@ -1922,7 +1926,7 @@ mod tests {
         let router = WasmChannelRouter::new();
 
         // Should not panic when ACKing a key that was never registered
-        router.ack_message("nonexistent:key", None).await;
+        router.ack_message("nonexistent:key", "").await;
     }
 
     #[tokio::test]
@@ -1933,9 +1937,129 @@ mod tests {
         let _rx = router.register_pending_ack(ack_key.to_string()).await;
 
         // First ACK
-        router.ack_message(ack_key, None).await;
+        router.ack_message(ack_key, "").await;
 
         // Second ACK should be safe (no panic)
-        router.ack_message(ack_key, None).await;
+        router.ack_message(ack_key, "").await;
+    }
+
+    // ── Category 8: JSON Pointer Extraction Tests ─────────────────────
+
+    #[test]
+    fn test_extract_json_pointer_valid() {
+        let json = r#"{"phone_number_id": "123456", "message_id": "wamid.abc123", "sender_phone": "+1234567890"}"#;
+
+        // Valid pointer to top-level field
+        assert_eq!(
+            extract_json_pointer(json, "/message_id"),
+            Some("wamid.abc123".to_string())
+        );
+
+        // Valid pointer to another field
+        assert_eq!(
+            extract_json_pointer(json, "/phone_number_id"),
+            Some("123456".to_string())
+        );
+
+        // Valid pointer to sender_phone
+        assert_eq!(
+            extract_json_pointer(json, "/sender_phone"),
+            Some("+1234567890".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_pointer_nested() {
+        let json = r#"{"entry": [{"id": "123", "changes": [{"value": {"messages": [{"id": "wamid.nested"}]}}]}]}"#;
+
+        // Nested pointer
+        assert_eq!(
+            extract_json_pointer(json, "/entry/0/id"),
+            Some("123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_pointer_missing_field() {
+        let json = r#"{"phone_number_id": "123456"}"#;
+
+        // Missing field returns None
+        assert_eq!(extract_json_pointer(json, "/nonexistent"), None);
+    }
+
+    #[test]
+    fn test_extract_json_pointer_invalid_json() {
+        // Invalid JSON returns None
+        assert_eq!(extract_json_pointer("not json", "/message_id"), None);
+
+        // Empty string returns None
+        assert_eq!(extract_json_pointer("", "/message_id"), None);
+
+        // Partial JSON returns None
+        assert_eq!(extract_json_pointer("{invalid", "/message_id"), None);
+    }
+
+    #[test]
+    fn test_extract_json_pointer_non_string_value() {
+        let json = r#"{"count": 42, "enabled": true, "data": null}"#;
+
+        // Non-string values return None (we only extract strings)
+        assert_eq!(extract_json_pointer(json, "/count"), None);
+        assert_eq!(extract_json_pointer(json, "/enabled"), None);
+        assert_eq!(extract_json_pointer(json, "/data"), None);
+    }
+
+    #[test]
+    fn test_extract_json_pointer_empty_pointer() {
+        let json = r#"{"message_id": "test"}"#;
+
+        // Empty pointer refers to root, which is an object not a string
+        assert_eq!(extract_json_pointer(json, ""), None);
+    }
+
+    #[tokio::test]
+    async fn test_message_id_json_pointer_registration() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("whatsapp");
+
+        // Register with message_id_json_pointer
+        router
+            .register(
+                channel,
+                vec![],
+                None,
+                None,
+                None,
+                Some("/message_id".to_string()),
+            )
+            .await;
+
+        // Should return the configured pointer
+        assert_eq!(
+            router.get_message_id_json_pointer("whatsapp").await,
+            Some("/message_id".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_id_json_pointer_not_configured() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("telegram");
+
+        // Register without message_id_json_pointer
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
+
+        // Should return None
+        assert_eq!(router.get_message_id_json_pointer("telegram").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_message_id_json_pointer_unregistered() {
+        let router = WasmChannelRouter::new();
+
+        // Never registered channel should return None
+        assert_eq!(router.get_message_id_json_pointer("unknown").await, None);
     }
 }

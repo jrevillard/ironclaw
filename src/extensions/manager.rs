@@ -2364,6 +2364,7 @@ impl ExtensionManager {
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let verification_mode = loaded.verification_mode().map(|s| s.to_string());
+        let message_id_json_pointer = loaded.message_id_json_pointer().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
 
@@ -2427,6 +2428,7 @@ impl ExtensionManager {
                     webhook_secret,
                     secret_header,
                     verification_mode,
+                    message_id_json_pointer,
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");

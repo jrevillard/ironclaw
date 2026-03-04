@@ -161,6 +161,19 @@ impl ChannelCapabilitiesFile {
             .and_then(|c| c.webhook.as_ref())
             .and_then(|w| w.hmac_secret_name.as_deref())
     }
+
+    /// Get the JSON pointer path to extract message ID from metadata.
+    ///
+    /// Returns the JSON pointer declared in `webhook.message_id_json_pointer`,
+    /// used for ACK key construction and deduplication.
+    /// If None, the router falls back to using user_id.
+    pub fn webhook_message_id_json_pointer(&self) -> Option<&str> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.message_id_json_pointer.as_deref())
+    }
 }
 
 /// Schema for channel capabilities.
@@ -288,6 +301,14 @@ pub struct WebhookSchema {
     /// The header format is expected to be "sha256=<hex_signature>".
     #[serde(default)]
     pub hmac_secret_name: Option<String>,
+
+    /// JSON pointer path to extract the unique message ID from metadata_json.
+    /// Used for ACK key construction and deduplication.
+    /// If None, the router falls back to using user_id.
+    ///
+    /// Example: "/message_id" extracts the "message_id" field from the metadata JSON.
+    #[serde(default)]
+    pub message_id_json_pointer: Option<String>,
 }
 
 /// Setup configuration schema.
