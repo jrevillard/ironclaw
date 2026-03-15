@@ -200,7 +200,7 @@ async fn test_group_message_unauthorized_user_blocked_with_allowlist() {
         .expect("HTTP callback failed");
 
     // Should return 200 OK (always respond quickly to Telegram)
-    assert_eq!(response.status, 200);
+    assert_eq!(response.0.status, 200);
 
     // REGRESSION TEST: The fix ensures the message is dropped
     // Before the fix: group messages bypassed the allow_from check when owner_id=null
@@ -252,7 +252,7 @@ async fn test_group_message_authorized_user_allowed() {
         .expect("HTTP callback failed");
 
     // Should return 200 OK
-    assert_eq!(response.status, 200);
+    assert_eq!(response.0.status, 200);
 
     // REGRESSION TEST: Authorized users pass through the authorization check
     // The fix ensures that group messages now properly check allow_from when owner_id=null
@@ -298,7 +298,7 @@ async fn test_private_message_with_owner_id_set_uses_guest_pairing_flow() {
         .await
         .expect("HTTP callback failed");
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.0.status, 200);
 
     let pending = pairing_store
         .list_pending("telegram")
@@ -398,7 +398,7 @@ async fn test_private_message_without_owner_id_with_pairing_policy() {
         .await
         .expect("HTTP callback failed");
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.0.status, 200);
 
     // REGRESSION TEST: Private messages with pairing policy still emit
     // (pairing and message emission are independent flows)
@@ -444,7 +444,7 @@ async fn test_open_dm_policy_allows_all_users() {
         .await
         .expect("HTTP callback failed");
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.0.status, 200);
 
     // REGRESSION TEST: Open policy should allow all users
     // With dm_policy="open", authorization checks are skipped for all users
@@ -489,7 +489,7 @@ async fn test_bot_mention_detection_case_insensitive() {
         .await
         .expect("HTTP callback failed");
 
-    assert_eq!(response.status, 200);
+    assert_eq!(response.0.status, 200);
 
     // REGRESSION TEST: Bot mentions should be case-insensitive
     // Case-insensitive detection allows @mybot and @MyBot to both trigger the bot
