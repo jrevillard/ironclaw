@@ -420,6 +420,10 @@ impl Agent {
         // Complete, fail, or request approval
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
+                // Extract <suggestions> from response text before user sees it
+                let (response, _suggestions) =
+                    crate::agent::dispatcher::extract_suggestions(&response);
+
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
