@@ -324,13 +324,6 @@ impl LoadedChannel {
             .as_ref()
             .and_then(|f| f.webhook_verification_mode().map(|s| s.to_string()))
     }
-
-    /// Get the message ID JSON pointer from capabilities.
-    pub fn webhook_message_id_json_pointer(&self) -> Option<String> {
-        self.capabilities_file
-            .as_ref()
-            .and_then(|f| f.webhook_message_id_json_pointer().map(|s| s.to_string()))
-    }
 }
 
 /// Results from loading multiple channels.

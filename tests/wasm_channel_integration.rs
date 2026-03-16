@@ -72,7 +72,7 @@ mod router_tests {
         }];
 
         router
-            .register(channel.clone(), endpoints, None, None, None, None)
+            .register(channel.clone(), endpoints, None, None, None)
             .await;
 
         // Verify channel is found by path
@@ -101,7 +101,6 @@ mod router_tests {
                 channel,
                 vec![],
                 Some("my-secret-123".to_string()),
-                None,
                 None,
                 None,
             )
@@ -143,9 +142,7 @@ mod router_tests {
             require_secret: false,
         }];
 
-        router
-            .register(channel, endpoints, None, None, None, None)
-            .await;
+        router.register(channel, endpoints, None, None, None).await;
 
         // Channel exists
         assert!(router.get_channel_for_path("/webhook/temp").await.is_some());
@@ -177,9 +174,7 @@ mod router_tests {
                 require_secret: false,
             }];
 
-            router
-                .register(channel, endpoints, None, None, None, None)
-                .await;
+            router.register(channel, endpoints, None, None, None).await;
         }
 
         // Verify all channels are registered
@@ -577,7 +572,6 @@ mod hmac_signature_tests {
                 Some("verify_token_123".to_string()),
                 Some("X-Hub-Signature-256".to_string()),
                 Some("query_param".to_string()),
-                Some("/metadata/message_id".to_string()),
             )
             .await;
 
@@ -596,12 +590,6 @@ mod hmac_signature_tests {
         assert_eq!(
             router.get_verification_mode("whatsapp").await,
             Some("query_param".to_string())
-        );
-
-        // Verify message ID pointer is stored
-        assert_eq!(
-            router.get_message_id_json_pointer("whatsapp").await,
-            Some("/metadata/message_id".to_string())
         );
     }
 }

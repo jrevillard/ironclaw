@@ -1,6 +1,6 @@
 {
   "version": "0.2.0",
-  "wit_version": "0.3.0",
+  "wit_version": "0.4.0",
   "type": "channel",
   "name": "whatsapp",
   "description": "WhatsApp Cloud API channel for receiving and responding to WhatsApp messages",
@@ -52,8 +52,7 @@
         "secret_name": "whatsapp_verify_token",
         "verify_token_param": "hub.verify_token",
         "verification_mode": "query_param",
-        "hmac_secret_name": "whatsapp_app_secret",
-        "message_id_json_pointer": "/metadata/message_id"
+        "hmac_secret_name": "whatsapp_app_secret"
       }
     }
   },

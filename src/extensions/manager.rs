@@ -3595,7 +3595,6 @@ impl ExtensionManager {
                     webhook_secret,
                     secret_header,
                     None, // verification_mode - not supported for hot-activated channels yet
-                    None, // message_id_json_pointer - not supported yet
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
