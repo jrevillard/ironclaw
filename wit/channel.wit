@@ -420,14 +420,14 @@ interface channel {
     on-shutdown: func();
 }
 
-/// Optional persistence callbacks for channels.
+/// Persistence callbacks for channels.
 ///
-/// Channels that need post-persistence notifications (e.g., WhatsApp mark_as_read)
-/// can export this interface. Channels that don't need it can omit this export
-/// and the host will gracefully skip the callback.
+/// All channels must implement this interface. Channels that don't need
+/// post-persistence actions (e.g., Discord, Slack) can return Ok(()).
+/// Channels like WhatsApp use this to call mark_as_read after persistence.
 ///
-/// This interface is optional for backward compatibility - existing channels
-/// continue to work without implementing it.
+/// Note: WIT does not support optional exports, so this interface is mandatory
+/// in the world definition. Channels implement no-op versions if unused.
 interface channel-persistence {
     /// Called after a message has been persisted to the database.
     ///
@@ -447,9 +447,9 @@ interface channel-persistence {
 ///
 /// Channels import host capabilities and export the channel interface.
 ///
-/// The channel-persistence interface is optional - channels implement it
-/// if they need persistence callbacks (e.g., WhatsApp mark_as_read).
-/// The host detects this at runtime using get_func() which returns Option.
+/// Note: WIT does not support optional exports. All channels must implement
+/// channel-persistence, even if just a no-op (return Ok(())). WhatsApp uses
+/// this for mark_as_read; other channels return Ok(()) immediately.
 world sandboxed-channel {
     import channel-host;
     export channel;
