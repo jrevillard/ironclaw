@@ -72,13 +72,16 @@ impl BatchingConfig {
     }
 
     /// Get config for a given channel name.
-    pub fn for_channel(channel: &str) -> Self {
+    ///
+    /// If the channel has specific predefined behavior (WhatsApp, Web, CLI),
+    /// those settings are used. Otherwise, falls back to the provided default.
+    pub fn for_channel(channel: &str, default: &Self) -> Self {
         match channel {
             "whatsapp" => Self::whatsapp(),
             "web" => Self::web(),
             "cli" | "repl" => Self::cli(),
-            // Default to WhatsApp-like behavior for unknown chat channels
-            _ => Self::default(),
+            // Use global config as fallback for unknown channels
+            _ => default.clone(),
         }
     }
 }
@@ -155,7 +158,7 @@ impl MessageBatcher {
             return;
         }
 
-        let config = BatchingConfig::for_channel(&message.channel);
+        let config = BatchingConfig::for_channel(&message.channel, &self.global_config);
 
         if !config.enabled {
             // Batching disabled for this channel - pass through immediately
@@ -406,7 +409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_batching_merges_messages() {
+    async fn test_batching_merges_messages() -> Result<(), Box<dyn std::error::Error>> {
         let batcher = MessageBatcher::new(BatchingConfig::default());
         let mut rx = batcher.subscribe();
 
@@ -418,11 +421,9 @@ mod tests {
         batcher.push(test_message("msg5")).await;
 
         // Should flush immediately due to max_messages
-        let received = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
-
-        assert!(received.is_ok());
-        let merged = received.unwrap().unwrap();
-        assert_eq!(merged.content, "msg1\n\nmsg2\n\nmsg3\n\nmsg4\n\nmsg5");
+        let received = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await??;
+        assert_eq!(received.content, "msg1\n\nmsg2\n\nmsg3\n\nmsg4\n\nmsg5");
+        Ok(())
     }
 
     #[tokio::test]
@@ -551,7 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_per_channel_config() {
+    async fn test_per_channel_config() -> Result<(), Box<dyn std::error::Error>> {
         let batcher = MessageBatcher::new(BatchingConfig::default());
         let mut rx = batcher.subscribe();
 
@@ -561,10 +562,9 @@ mod tests {
         batcher.push(cli_msg).await;
 
         // Should receive immediately
-        let received = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
-        assert!(received.is_ok());
-        let msg = received.unwrap().unwrap();
+        let msg = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await??;
         assert_eq!(msg.content, "cli_message");
+        Ok(())
     }
 
     #[tokio::test]

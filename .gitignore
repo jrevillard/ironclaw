@@ -12,9 +12,6 @@
 .sidecar/
 .todos/
 
-# Serena MCP plugin data
-.serena/
-
 target/
 
 # Python
