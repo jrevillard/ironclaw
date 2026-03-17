@@ -330,13 +330,17 @@ impl MessageBatcher {
             id: uuid::Uuid::new_v4(),
             channel: first.channel.clone(),
             user_id: first.user_id.clone(),
+            owner_id: first.owner_id.clone(),
+            sender_id: first.sender_id.clone(),
             user_name: first.user_name.clone(),
             content,
             thread_id: first.thread_id.clone(),
+            conversation_scope_id: first.conversation_scope_id.clone(),
             received_at: first.received_at,
             metadata: first.metadata.clone(),
             timezone: first.timezone.clone(),
             attachments: first.attachments.clone(),
+            is_internal: false,
         })
     }
 
@@ -367,13 +371,17 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             channel: "test".to_string(),
             user_id: "test_user".to_string(),
+            owner_id: "test_owner".to_string(),
+            sender_id: "test_user".to_string(),
             user_name: None,
             content: content.to_string(),
             thread_id: None,
+            conversation_scope_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
+            is_internal: false,
         }
     }
 
@@ -382,13 +390,17 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             channel: "test".to_string(),
             user_id: "test_user".to_string(),
+            owner_id: "test_owner".to_string(),
+            sender_id: "test_user".to_string(),
             user_name: None,
             content: content.to_string(),
             thread_id: thread_id.map(|s| s.to_string()),
+            conversation_scope_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
+            is_internal: false,
         }
     }
 
