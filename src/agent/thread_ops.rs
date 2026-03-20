@@ -386,6 +386,18 @@ impl Agent {
         )
         .await;
 
+        // Signal ACK to WASM channel router so webhook can return 200 OK
+        if let Some(router) = self.wasm_router() {
+            let ack_key = format!("{}:{}", message.channel, message.id);
+            router.ack_message(&ack_key, "{}").await;
+            tracing::debug!(
+                message_id = %message.id,
+                channel = %message.channel,
+                ack_key = %ack_key,
+                "Webhook ACK signaled after message persistence"
+            );
+        }
+
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,

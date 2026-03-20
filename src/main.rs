@@ -701,6 +701,12 @@ async fn async_main() -> anyhow::Result<()> {
         .await;
 
     // Wire up channel runtime for hot-activation of WASM channels.
+    // Clone the router for AgentDeps before passing to extension manager.
+    let wasm_router_for_deps: Option<Arc<ironclaw::channels::wasm::WasmChannelRouter>> =
+        wasm_channel_runtime_state
+            .as_ref()
+            .map(|(_, _, router)| Arc::clone(router));
+
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
@@ -812,6 +818,7 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
         builder: components.builder,
+        wasm_router: wasm_router_for_deps,
     };
 
     let channels_for_warnings = Arc::clone(&channels);

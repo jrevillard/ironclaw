@@ -1298,6 +1298,10 @@ impl WasmChannel {
     /// Execute the on_http_request callback.
     ///
     /// Called when an HTTP request arrives at a registered endpoint.
+    ///
+    /// Returns the HTTP response and a list of (message_id, metadata) tuples for
+    /// messages that were emitted during processing. This enables ACK tracking
+    /// for reliable webhook processing.
     pub async fn call_on_http_request(
         &self,
         method: &str,
@@ -1306,7 +1310,7 @@ impl WasmChannel {
         query: &HashMap<String, String>,
         body: &[u8],
         secret_validated: bool,
-    ) -> Result<HttpResponse, WasmChannelError> {
+    ) -> Result<(HttpResponse, Vec<(uuid::Uuid, serde_json::Value)>), WasmChannelError> {
         tracing::info!(
             channel = %self.name,
             method = method,
@@ -1342,7 +1346,7 @@ impl WasmChannel {
                 path = path,
                 "WASM channel on_http_request called (no WASM module)"
             );
-            return Ok(HttpResponse::ok());
+            return Ok((HttpResponse::ok(), Vec::new()));
         }
 
         let runtime = Arc::clone(&self.runtime);
@@ -1418,16 +1422,17 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         match result {
             Ok(Ok((response, mut host_state))) => {
-                // Process emitted messages
+                // Process emitted messages and collect their info for ACK tracking
                 let emitted = host_state.take_emitted_messages();
-                self.process_emitted_messages(emitted).await?;
+                let emitted_info = self.process_emitted_messages(emitted).await?;
 
                 tracing::debug!(
                     channel = %channel_name,
                     status = response.status,
+                    emitted_count = emitted_info.len(),
                     "WASM channel on_http_request completed"
                 );
-                Ok(response)
+                Ok((response, emitted_info))
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(WasmChannelError::Timeout {
@@ -1504,9 +1509,9 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         match result {
             Ok(Ok(((), mut host_state))) => {
-                // Process emitted messages
+                // Process emitted messages (ACK tracking not needed for polling)
                 let emitted = host_state.take_emitted_messages();
-                self.process_emitted_messages(emitted).await?;
+                let _ = self.process_emitted_messages(emitted).await?;
 
                 tracing::debug!(
                     channel = %channel_name,
@@ -2151,10 +2156,14 @@ impl WasmChannel {
     }
 
     /// Process emitted messages from a callback.
+    ///
+    /// Returns a list of (message_id, metadata) tuples for messages that were
+    /// successfully sent to the agent. This enables ACK tracking for reliable
+    /// webhook processing.
     async fn process_emitted_messages(
         &self,
         messages: Vec<EmittedMessage>,
-    ) -> Result<(), WasmChannelError> {
+    ) -> Result<Vec<(uuid::Uuid, serde_json::Value)>, WasmChannelError> {
         tracing::info!(
             channel = %self.name,
             message_count = messages.len(),
@@ -2163,8 +2172,10 @@ impl WasmChannel {
 
         if messages.is_empty() {
             tracing::debug!(channel = %self.name, "No messages emitted");
-            return Ok(());
+            return Ok(Vec::new());
         }
+
+        let mut emitted_info = Vec::new();
 
         // Clone sender to avoid holding RwLock read guard across send().await in the loop
         let tx = {
@@ -2175,7 +2186,7 @@ impl WasmChannel {
                     count = messages.len(),
                     "Messages emitted but no sender available - channel may not be started!"
                 );
-                return Ok(());
+                return Ok(Vec::new());
             };
             tx.clone()
         };
@@ -2205,6 +2216,7 @@ impl WasmChannel {
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
                 .with_owner_id(&self.owner_scope_id)
                 .with_sender_id(&emitted.user_id);
+            let message_id = msg.id; // Capture ID before moving msg (for ACK tracking)
 
             if let Some(name) = emitted.user_name {
                 msg = msg.with_user_name(name);
@@ -2242,6 +2254,9 @@ impl WasmChannel {
                 self.update_broadcast_metadata(&emitted.metadata_json).await;
             }
 
+            // Extract metadata for ACK mechanism (after apply_emitted_metadata)
+            let metadata = msg.metadata.clone();
+
             // Send to stream — no locks held across this await
             tracing::info!(
                 channel = %self.name,
@@ -2263,9 +2278,12 @@ impl WasmChannel {
                 channel = %self.name,
                 "Message successfully sent to agent queue"
             );
+
+            // Track for ACK mechanism
+            emitted_info.push((message_id, metadata));
         }
 
-        Ok(())
+        Ok(emitted_info)
     }
 
     /// Start the polling loop if configured.
