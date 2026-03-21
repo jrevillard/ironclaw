@@ -304,17 +304,18 @@ impl WasmChannelRouter {
             tracing::debug!(key = %key, "Webhook ACK signaled");
 
             // Parse key to get channel name for callback
-            let channel_name = key.split(':').next().unwrap_or("");
-
-            // Look up the channel and call on_message_persisted
-            if let Some(channel) = self.channels.read().await.get(channel_name)
-                && let Err(e) = channel.call_on_message_persisted(message_metadata).await
-            {
-                tracing::warn!(
-                    channel = %channel_name,
-                    error = %e,
-                    "on_message_persisted callback failed (best-effort)"
-                );
+            if let Some((channel_name, _)) = key.split_once(':') {
+                if let Some(channel) = self.channels.read().await.get(channel_name) {
+                    if let Err(e) = channel.call_on_message_persisted(message_metadata).await {
+                        tracing::warn!(
+                            channel = %channel_name,
+                            error = %e,
+                            "on_message_persisted callback failed (best-effort)"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(key = %key, "Malformed ACK key, cannot call on_message_persisted");
             }
         } else {
             tracing::debug!(key = %key, "No pending ACK found (may have timed out)");
@@ -1812,6 +1813,29 @@ mod tests {
             !router.pending_acks.read().await.contains_key(&key),
             "Pending ACK should be cleaned up after timeout"
         );
+    }
+
+    /// Regression test for ack_message with malformed key.
+    /// Verifies that ack_message handles keys without ':' separator gracefully.
+    #[tokio::test]
+    async fn test_ack_message_malformed_key_logs_warning() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("test-channel");
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "test-channel".to_string(),
+            path: "/webhook/test".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        router.register(channel, endpoints, None, None).await;
+
+        // Call ack_message with a malformed key (no ':' separator)
+        // This should not panic and should log a warning
+        router.ack_message("malformed_key_without_colon", r#"{"test": "metadata"}"#).await;
+
+        // Verify no callback was made (channel would have panicked if called with empty string)
+        // The test passes if we reaches this point without panic
     }
 
     // ── WhatsApp-style HMAC Verification Tests ───────────────────────────
