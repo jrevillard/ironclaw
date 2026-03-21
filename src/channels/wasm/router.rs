@@ -292,15 +292,30 @@ impl WasmChannelRouter {
     /// Signal that a message has been persisted and the webhook can return 200 OK.
     ///
     /// Called by the agent loop after persist_user_message() completes.
+    /// Also calls the optional `on_message_persisted` callback on the WASM channel.
     ///
     /// # Arguments
     /// * `key` - The same key passed to register_pending_ack() (format: "channel:message_id")
-    /// * `_message_metadata` - JSON metadata for channel-specific post-persistence actions (reserved)
-    pub async fn ack_message(&self, key: &str, _message_metadata: &str) {
+    /// * `message_metadata` - JSON metadata for channel-specific post-persistence actions
+    pub async fn ack_message(&self, key: &str, message_metadata: &str) {
         if let Some(tx) = self.pending_acks.write().await.remove(key) {
             // Signal the webhook handler to return 200 OK
             let _ = tx.send(());
             tracing::debug!(key = %key, "Webhook ACK signaled");
+
+            // Parse key to get channel name for callback
+            let channel_name = key.split(':').next().unwrap_or("");
+
+            // Look up the channel and call on_message_persisted
+            if let Some(channel) = self.channels.read().await.get(channel_name)
+                && let Err(e) = channel.call_on_message_persisted(message_metadata).await
+            {
+                tracing::warn!(
+                    channel = %channel_name,
+                    error = %e,
+                    "on_message_persisted callback failed (best-effort)"
+                );
+            }
         } else {
             tracing::debug!(key = %key, "No pending ACK found (may have timed out)");
         }
@@ -1711,9 +1726,8 @@ mod tests {
         let key = "test:message123".to_string();
         let rx = router.register_pending_ack(key.clone()).await;
 
-        // ACK the message with metadata
-        let metadata = r#"{"phone_number_id":"123","message_id":"msg456"}"#;
-        router.ack_message(&key, metadata).await;
+        // ACK the message
+        router.ack_message(&key, "{}").await;
 
         // Receiver should be signaled
         let result = rx.await;

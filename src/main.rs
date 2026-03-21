@@ -416,6 +416,14 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Register WASM message persisted hook if WASM channels are loaded
+    if let Some(ref state) = wasm_channel_runtime_state {
+        use ironclaw::channels::wasm::MessagePersistedHook;
+        let hook = std::sync::Arc::new(MessagePersistedHook::new(Arc::clone(&state.2)));
+        components.hooks.register(hook).await;
+        tracing::debug!("Registered MessagePersisted hook for WASM channel ACK signaling");
+    }
+
     // Add Signal channel if configured and not CLI-only mode.
     if !cli.cli_only
         && let Some(ref signal_config) = config.channels.signal

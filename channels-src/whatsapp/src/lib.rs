@@ -32,6 +32,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 // ============================================================================
@@ -954,6 +955,18 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
         status,
         headers_json: headers.to_string(),
         body,
+    }
+}
+
+// ============================================================================
+// Channel Persistence
+// ============================================================================
+
+impl channel_persistence::Guest for WhatsAppChannel {
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        // TODO: Call WhatsApp mark_as_read API using metadata
+        // For now, this is a no-op placeholder
+        Ok(())
     }
 }
 

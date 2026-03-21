@@ -308,11 +308,6 @@ impl Agent {
         self.deps.workspace.as_ref()
     }
 
-    /// Get the WASM channel router for webhook ACK signaling.
-    pub(super) fn wasm_router(&self) -> Option<&Arc<crate::channels::wasm::WasmChannelRouter>> {
-        self.deps.wasm_router.as_ref()
-    }
-
     pub(super) fn hooks(&self) -> &Arc<HookRegistry> {
         &self.deps.hooks
     }
